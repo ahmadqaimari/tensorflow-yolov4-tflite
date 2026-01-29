@@ -5,13 +5,11 @@ if len(physical_devices) > 0:
 from absl import app, flags, logging
 from absl.flags import FLAGS
 import core.utils as utils
-from core.yolov4 import filter_boxes
+from core.yolov4 import filter_boxes, decode
 from tensorflow.python.saved_model import tag_constants
 from PIL import Image
 import cv2
 import numpy as np
-from tensorflow.compat.v1 import ConfigProto
-from tensorflow.compat.v1 import InteractiveSession
 
 flags.DEFINE_string('framework', 'tf', '(tf, tflite, trt')
 flags.DEFINE_string('weights', './checkpoints/yolov4-416',
@@ -25,9 +23,6 @@ flags.DEFINE_float('iou', 0.45, 'iou threshold')
 flags.DEFINE_float('score', 0.25, 'score threshold')
 
 def main(_argv):
-    config = ConfigProto()
-    config.gpu_options.allow_growth = True
-    session = InteractiveSession(config=config)
     STRIDES, ANCHORS, NUM_CLASS, XYSCALE = utils.load_config(FLAGS)
     input_size = FLAGS.size
     image_path = FLAGS.image
@@ -55,10 +50,32 @@ def main(_argv):
         interpreter.set_tensor(input_details[0]['index'], images_data)
         interpreter.invoke()
         pred = [interpreter.get_tensor(output_details[i]['index']) for i in range(len(output_details))]
-        if FLAGS.model == 'yolov3' and FLAGS.tiny == True:
-            boxes, pred_conf = filter_boxes(pred[1], pred[0], score_threshold=0.25, input_shape=tf.constant([input_size, input_size]))
+        if FLAGS.tiny == True:
+            # YOLOv4-Tiny has 2 detection heads
+            # pred[0] is the larger feature map (26x26), pred[1] is smaller (13x13)
+            bbox_tensors = []
+            prob_tensors = []
+            for i, fm in enumerate(pred):
+                if i == 0:
+                    # First output (26x26) - for larger objects
+                    output_tensors = decode(fm, input_size // 16, NUM_CLASS, STRIDES, ANCHORS, i, XYSCALE, 'tflite')
+                elif i == 1:
+                    # Second output (13x13) - for smaller objects
+                    output_tensors = decode(fm, input_size // 32, NUM_CLASS, STRIDES, ANCHORS, i, XYSCALE, 'tflite')
+                bbox_tensors.append(output_tensors[0])
+                prob_tensors.append(output_tensors[1])
+            pred_bbox = tf.concat(bbox_tensors, axis=1)
+            pred_prob = tf.concat(prob_tensors, axis=1)
+            boxes, pred_conf = filter_boxes(pred_bbox, pred_prob, score_threshold=0.25,
+                                            input_shape=tf.constant([input_size, input_size]))
         else:
-            boxes, pred_conf = filter_boxes(pred[0], pred[1], score_threshold=0.25, input_shape=tf.constant([input_size, input_size]))
+            # Full YOLOv4 direct filter
+            if FLAGS.model == 'yolov3' and FLAGS.tiny == True:
+                boxes, pred_conf = filter_boxes(pred[1], pred[0], score_threshold=0.25,
+                                                input_shape=tf.constant([input_size, input_size]))
+            else:
+                boxes, pred_conf = filter_boxes(pred[0], pred[1], score_threshold=0.25,
+                                                input_shape=tf.constant([input_size, input_size]))
     else:
         saved_model_loaded = tf.saved_model.load(FLAGS.weights, tags=[tag_constants.SERVING])
         infer = saved_model_loaded.signatures['serving_default']
@@ -78,12 +95,14 @@ def main(_argv):
         score_threshold=FLAGS.score
     )
     pred_bbox = [boxes.numpy(), scores.numpy(), classes.numpy(), valid_detections.numpy()]
+    print(f"Boxes shape: {pred_bbox[0].shape}, Scores shape: {pred_bbox[1].shape}, Classes shape: {pred_bbox[2].shape}, Valid detections: {pred_bbox[3]}")
+    print(f"First few boxes: {pred_bbox[0][0][:5]}")
     image = utils.draw_bbox(original_image, pred_bbox)
-    # image = utils.draw_bbox(image_data*255, pred_bbox)
     image = Image.fromarray(image.astype(np.uint8))
     image.show()
     image = cv2.cvtColor(np.array(image), cv2.COLOR_BGR2RGB)
     cv2.imwrite(FLAGS.output, image)
+    print('Output saved to:', FLAGS.output)
 
 if __name__ == '__main__':
     try:

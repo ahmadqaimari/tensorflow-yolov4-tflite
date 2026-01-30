@@ -105,14 +105,14 @@ def save_tflite():
     converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS, tf.lite.OpsSet.SELECT_TF_OPS]
     converter.allow_custom_ops = True
   elif FLAGS.quantize_mode == 'int8':
-    converter.optimizations = [tf.lite.Optimize.DEFAULT]
+    converter.optimizations = [tf.lite.Optimize.DEFAULT]  # REQUIRED for INT8 quantization
     converter.representative_dataset = representative_data_gen
 
     # Use SELECT_TF_OPS to handle FusedBatchNormV3
     # XNNPACK won't try to execute TF Select ops, avoiding the runtime error
     converter.target_spec.supported_ops = [
         tf.lite.OpsSet.TFLITE_BUILTINS_INT8,  # INT8 quantized ops for Conv2D
-        tf.lite.OpsSet.SELECT_TF_OPS          # TF ops for BatchNorm (XNNPACK won't touch these)
+        tf.lite.OpsSet.SELECT_TF_OPS          # TF ops for BatchNorm (Flex delegate)
     ]
 
     # Force full INT8 quantization for supported ops

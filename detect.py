@@ -94,6 +94,14 @@ def main(_argv):
                 scale, zero_point = output_details[i]['quantization']
                 pred[i] = (pred[i].astype(np.float32) - zero_point) * scale
 
+        # Sort predictions by spatial size (larger grid first)
+        # YOLOv4-tiny outputs should be [26x26, 13x13]
+        if len(pred) == 2:
+            # Check the spatial dimensions and sort: larger first, smaller second
+            if pred[0].shape[1] < pred[1].shape[1]:  # If first output is smaller
+                pred = [pred[1], pred[0]]  # Swap to [larger, smaller]
+                print(f"Swapped output order: [{pred[0].shape}, {pred[1].shape}]")
+
         if FLAGS.tiny == True:
             # YOLOv4-Tiny has 2 detection heads
             # pred[0] is the larger feature map (26x26), pred[1] is smaller (13x13)

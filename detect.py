@@ -1,4 +1,7 @@
 import os
+
+from tensorflow.lite.python.interpreter import OpResolverType
+
 # Disable XNNPACK delegate to avoid compatibility issues with quantized models
 os.environ['TF_LITE_ENABLE_XNNPACK'] = '0'
 
@@ -38,7 +41,7 @@ def main(_argv):
         # Try to create interpreter without XNNPACK
         try:
             # First attempt: load without delegates
-            interpreter = tf.lite.Interpreter(model_path=FLAGS.weights)
+            interpreter = tf.lite.Interpreter(model_path=FLAGS.weights,experimental_op_resolver_type=OpResolverType.BUILTIN_WITHOUT_DEFAULT_DELEGATES)
             interpreter.allocate_tensors()
         except Exception as e:
             logging.error(f"Failed to load interpreter: {e}")

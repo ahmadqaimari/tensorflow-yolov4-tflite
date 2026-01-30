@@ -84,8 +84,16 @@ python coco_convert.py --input ./coco/annotations/instances_val2017.json --outpu
 python coco_annotation.py --coco_path ./coco 
 cd ..
 
-# evaluate yolov4 model
+# evaluate yolov4 model (.weights)
 python evaluate.py --weights ./data/yolov4.weights
+
+# evaluate yolov4-tiny INT8 quantized TFLite model
+python evaluate.py --weights ./checkpoints/yolov4-tiny-INT8-WITH-FLEX.tflite --framework tflite --model yolov4 --tiny True --size 416 --annotation_path ./data/dataset/val2017.txt
+
+# evaluate yolov4-tiny FP32 TFLite model
+python evaluate.py --weights ./checkpoints/yolov4-tiny-416.tflite --framework tflite --model yolov4 --tiny True --size 416 --annotation_path ./data/dataset/val2017.txt
+
+# calculate mAP
 cd mAP/extra
 python remove_space.py
 cd ..

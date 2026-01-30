@@ -3,7 +3,7 @@ from collections import Counter
 import numpy as np
 
 # Load the quantized TFLite model
-model_path = "./checkpoints/yolov4-tiny-INT8-WITH-FLEX.tflite"
+model_path = "./checkpoints/yolov4-tiny-folded-int8.tflite "
 interpreter = tf.lite.Interpreter(model_path=model_path)
 interpreter.allocate_tensors()
 

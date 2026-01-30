@@ -5,6 +5,8 @@ import os
 import shutil
 import numpy as np
 import tensorflow as tf
+from tensorflow.lite.python.interpreter import OpResolverType
+
 from core.yolov4 import filter_boxes, decode
 from tensorflow.python.saved_model import tag_constants
 import core.utils as utils
@@ -39,7 +41,7 @@ def main(_argv):
 
     # Build Model
     if FLAGS.framework == 'tflite':
-        interpreter = tf.lite.Interpreter(model_path=FLAGS.weights)
+        interpreter = tf.lite.Interpreter(model_path=FLAGS.weights,experimental_op_resolver_type=OpResolverType.BUILTIN_WITHOUT_DEFAULT_DELEGATES)
         interpreter.allocate_tensors()
         input_details = interpreter.get_input_details()
         output_details = interpreter.get_output_details()

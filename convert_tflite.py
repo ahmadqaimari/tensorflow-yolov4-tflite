@@ -1,3 +1,13 @@
+import os
+
+from tensorflow.lite.python.interpreter import OpResolverType
+
+# CRITICAL: Disable XNNPACK BEFORE importing TensorFlow
+# This allows testing on x86 CPU the same way it will run on ARM (Conv2D on FPGA, rest on CPU)
+os.environ['TF_LITE_ENABLE_XNNPACK'] = '0'
+os.environ['TF_LITE_DISABLE_XNNPACK'] = '1'
+os.environ['XNNPACK_DELEGATE_ENABLE'] = '0'
+
 import tensorflow as tf
 from absl import app, flags, logging
 from absl.flags import FLAGS
@@ -5,7 +15,6 @@ import numpy as np
 import cv2
 from core.yolov4 import YOLOv4, YOLOv3, YOLOv3_tiny, decode
 import core.utils as utils
-import os
 from core.config import cfg
 
 flags.DEFINE_string('weights', './checkpoints/yolov4-416', 'path to weights file')
@@ -108,18 +117,21 @@ def save_tflite():
     converter.optimizations = [tf.lite.Optimize.DEFAULT]  # REQUIRED for INT8 quantization
     converter.representative_dataset = representative_data_gen
 
-    # Use SELECT_TF_OPS to handle FusedBatchNormV3
-    # XNNPACK won't try to execute TF Select ops, avoiding the runtime error
+    # For models WITH folded BatchNorm (no BN layers in graph):
+    # Use only TFLITE_BUILTINS_INT8 for pure INT8 without Flex ops
     converter.target_spec.supported_ops = [
-        tf.lite.OpsSet.TFLITE_BUILTINS_INT8,  # INT8 quantized ops for Conv2D
-        tf.lite.OpsSet.SELECT_TF_OPS          # TF ops for BatchNorm (Flex delegate)
+        tf.lite.OpsSet.TFLITE_BUILTINS_INT8,  # INT8 quantized ops
     ]
 
-    # Force full INT8 quantization for supported ops
+    # Force full INT8 quantization
     converter.inference_input_type = tf.uint8
     converter.inference_output_type = tf.uint8
 
-    # Result: Conv2D INT8, BatchNorm as Flex ops (works without XNNPACK issues)
+    # Disable XNNPACK delegate which can cause issues with some ops
+    converter.experimental_new_converter = True
+
+    # If you still get XNNPACK errors at inference, you may need to disable it
+    # when loading the interpreter. See demo() function below.
   tflite_model = converter.convert()
   open(FLAGS.output, 'wb').write(tflite_model)
 
@@ -127,17 +139,19 @@ def save_tflite():
 
 
 def demo():
-  # Explicitly disable XNNPACK delegate
+  # Disable XNNPACK delegate to avoid runtime errors with certain ops
+  # XNNPACK can fail with error "Node number X failed to invoke"
   try:
     # Method 1: Use InterpreterOptions to disable XNNPACK
     interpreter = tf.lite.Interpreter(
-        model_path=FLAGS.output,
-        num_threads=1,
-        experimental_preserve_all_tensors=False
+      model_path="your_model.tflite",
+      experimental_op_resolver_type=OpResolverType.BUILTIN_WITHOUT_DEFAULT_DELEGATES
     )
-  except:
+  except Exception as e:
+    print("HERE")
     # Fallback
-    interpreter = tf.lite.Interpreter(model_path=FLAGS.output)
+    interpreter = tf.lite.Interpreter(model_path=FLAGS.output,
+      experimental_op_resolver_type=OpResolverType.BUILTIN_WITHOUT_DEFAULT_DELEGATES)
 
   interpreter.allocate_tensors()
   logging.info('tflite model loaded')

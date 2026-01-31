@@ -386,9 +386,9 @@ def fine_tune_pruned_model(model_for_pruning):
                                 max_iou = iou
                                 best_anchor_ind = anchor_ind
 
-                        # Encode bbox in grid cell (NOT normalized, in pixels)
+                        # Encode bbox in grid cell (normalized [0,1] as expected by compute_loss)
                         label = labels[i]
-                        label[yind, xind, best_anchor_ind, 0:4] = bbox_xywh  # Store in pixels
+                        label[yind, xind, best_anchor_ind, 0:4] = bbox_xywh / FLAGS.input_size  # Normalize to [0,1]
                         label[yind, xind, best_anchor_ind, 4] = 1.0  # objectness
                         label[yind, xind, best_anchor_ind, 5 + bbox_class_ind] = 1.0  # class
 

@@ -264,20 +264,113 @@ def fine_tune_pruned_model(model_for_pruning):
             else:
                 logging.warning("   ⚠️  Model is on CPU")
 
-    # Load training dataset (you need to implement this based on your data format)
-    # For now, we'll use a placeholder
-    logging.warning("\nFine-tuning requires proper dataset implementation")
-    logging.info("Using dummy data for demonstration...")
+    # Load training dataset
+    logging.warning("\n⚠️  Fine-tuning requires proper YOLO loss function")
+    logging.info("Loading dataset from: {}".format(FLAGS.train_dataset))
 
-    # Create dummy data
-    num_samples = 100
-    x_train = np.random.rand(num_samples, FLAGS.input_size, FLAGS.input_size, 3).astype(np.float32)
-    y_train = np.random.rand(num_samples, FLAGS.input_size // 32, FLAGS.input_size // 32, 255).astype(np.float32)
+    # YOLOv4-Tiny has TWO output heads (multi-scale detection):
+    # - Output 1: [batch, 26, 26, 255] for detecting larger objects (stride 16)
+    # - Output 2: [batch, 13, 13, 255] for detecting smaller objects (stride 32)
+    # Each output has 255 channels: 3 anchors * (5 + 80 classes) = 3 * 85 = 255
 
-    # Compile model
+    try:
+        # Import dataset utilities
+        from core.dataset import Dataset
+        from core.config import cfg
+
+        # Create a simple FLAGS-like object for Dataset class
+        class DatasetFlags:
+            def __init__(self):
+                self.tiny = FLAGS.tiny
+                self.model = FLAGS.model
+
+        dataset_flags = DatasetFlags()
+
+        # Update config with training dataset path
+        original_train_path = cfg.TRAIN.ANNOT_PATH
+        cfg.TRAIN.ANNOT_PATH = FLAGS.train_dataset
+        cfg.TRAIN.BATCH_SIZE = FLAGS.batch_size
+        cfg.TRAIN.INPUT_SIZE = FLAGS.input_size
+
+        # Create dataset
+        logging.info(f"Creating training dataset (batch_size={FLAGS.batch_size})...")
+        trainset = Dataset(dataset_flags, is_training=True, dataset_type="converted_coco")
+
+        logging.info(f"✓ Dataset loaded: {trainset.num_samples} images")
+        logging.info(f"✓ Number of batches: {trainset.num_batchs}")
+
+        # Restore original config
+        cfg.TRAIN.ANNOT_PATH = original_train_path
+
+        # Create TensorFlow dataset
+        train_dataset = tf.data.Dataset.from_generator(
+            lambda: trainset,
+            output_signature=(
+                tf.TensorSpec(shape=(FLAGS.batch_size, FLAGS.input_size, FLAGS.input_size, 3), dtype=tf.float32),
+                (
+                    # Small objects (26x26 for 416 input)
+                    (
+                        tf.TensorSpec(shape=(FLAGS.batch_size, FLAGS.input_size // 16, FLAGS.input_size // 16, 3, 85), dtype=tf.float32),
+                        tf.TensorSpec(shape=(FLAGS.batch_size, 150, 4), dtype=tf.float32)
+                    ),
+                    # Medium objects (13x13 for 416 input)
+                    (
+                        tf.TensorSpec(shape=(FLAGS.batch_size, FLAGS.input_size // 32, FLAGS.input_size // 32, 3, 85), dtype=tf.float32),
+                        tf.TensorSpec(shape=(FLAGS.batch_size, 150, 4), dtype=tf.float32)
+                    ),
+                    # Large objects (13x13 for tiny - only 2 scales)
+                    (
+                        tf.TensorSpec(shape=(FLAGS.batch_size, FLAGS.input_size // 32, FLAGS.input_size // 32, 3, 85), dtype=tf.float32),
+                        tf.TensorSpec(shape=(FLAGS.batch_size, 150, 4), dtype=tf.float32)
+                    ),
+                )
+            )
+        )
+
+        # For YOLOv4-Tiny, we need to extract just the grid outputs (not bbox lists)
+        # The model outputs 2 detection heads: [26x26x255, 13x13x255]
+        def process_batch(images, targets):
+            """Extract just the grid predictions from dataset format"""
+            small_target, medium_target, large_target = targets
+            small_grid, _ = small_target  # Shape: [batch, 26, 26, 3, 85]
+            medium_grid, _ = medium_target  # Shape: [batch, 13, 13, 3, 85]
+
+            # Flatten the anchor dimension into channels: [batch, H, W, 3*85]
+            output1 = tf.reshape(small_grid, [FLAGS.batch_size, FLAGS.input_size // 16, FLAGS.input_size // 16, 255])
+            output2 = tf.reshape(medium_grid, [FLAGS.batch_size, FLAGS.input_size // 32, FLAGS.input_size // 32, 255])
+
+            return images, [output1, output2]
+
+        train_dataset = train_dataset.map(process_batch)
+
+        # Take limited steps for pruning (not full training)
+        steps_per_epoch = min(trainset.num_batchs, FLAGS.end_step // FLAGS.epochs)
+        logging.info(f"✓ Steps per epoch: {steps_per_epoch}")
+
+    except Exception as e:
+        logging.error(f"❌ Failed to load dataset: {e}")
+        logging.error("   Falling back to dummy data for testing...")
+        logging.error("   NOTE: This will NOT produce a useful pruned model!")
+
+        # Fallback to dummy data
+        num_samples = 100
+        x_train = np.random.rand(num_samples, FLAGS.input_size, FLAGS.input_size, 3).astype(np.float32)
+
+        # Create outputs for BOTH detection heads
+        y_train_large = np.random.rand(num_samples, FLAGS.input_size // 16, FLAGS.input_size // 16, 255).astype(np.float32)  # 26x26
+        y_train_small = np.random.rand(num_samples, FLAGS.input_size // 32, FLAGS.input_size // 32, 255).astype(np.float32)  # 13x13
+        y_train = [y_train_large, y_train_small]
+
+        train_dataset = tf.data.Dataset.from_tensor_slices((x_train, y_train))
+        train_dataset = train_dataset.batch(FLAGS.batch_size)
+        steps_per_epoch = None
+
+    # Compile model with multiple outputs
     model_for_pruning.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=FLAGS.learning_rate),
         loss='mse',  # Use your actual YOLO loss function here
+        # For multiple outputs, loss can be a list or dict
+        # loss=['mse', 'mse'],  # One loss per output
         metrics=['accuracy']
     )
 
@@ -290,15 +383,15 @@ def fine_tune_pruned_model(model_for_pruning):
 
     # Train
     logging.info(f"\nTraining for {FLAGS.epochs} epochs...")
+    if steps_per_epoch:
+        logging.info(f"Steps per epoch: {steps_per_epoch}")
     logging.info("Monitoring GPU utilization (check nvidia-smi in another terminal)...")
 
     # Fit model - TensorFlow will automatically use GPU if available
     history = model_for_pruning.fit(
-        x_train,
-        y_train,
-        batch_size=FLAGS.batch_size,
+        train_dataset,
         epochs=FLAGS.epochs,
-        validation_split=0.1,
+        steps_per_epoch=steps_per_epoch,
         callbacks=callbacks,
         verbose=1
     )

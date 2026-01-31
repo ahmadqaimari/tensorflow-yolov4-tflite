@@ -594,7 +594,15 @@ def fine_tune_pruned_model(model_for_pruning):
     logging.info(f"Learning rate: {FLAGS.learning_rate}")
     logging.info("")
 
+    # Create pruning callback (required for pruning wrappers)
+    pruning_callback = tfmot.sparsity.keras.UpdatePruningStep()
+    pruning_callback.set_model(model_for_training)
+    pruning_callback.on_train_begin()  # Initialize
+
     global_step = 0
+
+    # Initialize for final summary (in case no training occurs)
+    avg_total = avg_giou = avg_conf = avg_prob = 0.0
 
     for epoch in range(FLAGS.epochs):
         logging.info("=" * 80)
@@ -610,11 +618,15 @@ def fine_tune_pruned_model(model_for_pruning):
             if batch_idx >= steps_per_epoch:
                 break
 
+            # Call pruning callback before training step (required!)
+            pruning_callback.on_train_batch_begin(batch=global_step)
+
             # Training step with proper YOLO loss
             total_loss, giou_loss, conf_loss, prob_loss = train_step(images, targets)
 
-            # Update pruning step (required for pruning schedule)
-            tfmot.sparsity.keras.UpdatePruningStep()(global_step)
+            # Call pruning callback after training step
+            pruning_callback.on_train_batch_end(batch=global_step)
+
             global_step += 1
 
             epoch_total_loss += total_loss.numpy()

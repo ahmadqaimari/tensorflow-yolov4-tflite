@@ -125,10 +125,20 @@ def get_pruning_params():
     if FLAGS.block_size:
         try:
             block_size = [int(x) for x in FLAGS.block_size.split(',')]
-            pruning_params['block_size'] = block_size
-            logging.info(f"Using block sparsity: {block_size}")
-        except:
-            logging.warning(f"Invalid block_size format: {FLAGS.block_size}. Using default.")
+
+            # For Conv2D layers, block_size must have 4 dimensions: [H, W, in_channels, out_channels]
+            # Common patterns:
+            # - [1, 1, 1, 4]: Prune 4 output channels at a time (good for hardware)
+            # - [1, 1, 4, 1]: Prune 4 input channels at a time
+            if len(block_size) != 4:
+                logging.warning(f"Block size must be 4D for Conv2D layers (e.g., [1,1,1,4]). Got: {block_size}")
+                logging.warning("Ignoring block_size parameter and using unstructured pruning.")
+            else:
+                pruning_params['block_size'] = tuple(block_size)
+                logging.info(f"Using block sparsity: {block_size}")
+                logging.info(f"  [H={block_size[0]}, W={block_size[1]}, InCh={block_size[2]}, OutCh={block_size[3]}]")
+        except Exception as e:
+            logging.warning(f"Invalid block_size format: {FLAGS.block_size}. Error: {e}. Using default.")
 
     return pruning_params
 

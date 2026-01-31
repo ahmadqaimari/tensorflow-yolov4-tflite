@@ -82,8 +82,7 @@ The pruning process follows these steps:
 
 | Parameter | Description | Example |
 |-----------|-------------|---------|
-| `--block_size` | Structured sparsity | `"1,16"` |
-| `--prune_whole_model` | Prune all vs selective | True |
+| `--block_size` | Structured sparsity (4D: H,W,InCh,OutCh) | `"1,1,1,4"` |
 | `--skip_layers` | Layers to skip | `"conv2d_0,conv2d_20"` |
 
 ### Fine-Tuning (Optional)
@@ -139,15 +138,24 @@ python prune_model.py \
 ### Example 4: Block Sparsity for Hardware
 
 ```bash
+# For FPGA with systolic arrays (prunes 4x4 blocks)
 python prune_model.py \
     --weights ./data/yolov4-tiny.weights \
     --output ./checkpoints/yolov4-tiny-pruned-block \
     --model yolov4 --tiny \
     --final_sparsity 0.5 \
-    --block_size "1,16"
+    --block_size "1,1,4,4"
+
+# For ARM CPU with NEON SIMD (prunes 4 output channels at a time)
+python prune_model.py \
+    --weights ./data/yolov4-tiny.weights \
+    --output ./checkpoints/yolov4-tiny-pruned-block \
+    --model yolov4 --tiny \
+    --final_sparsity 0.5 \
+    --block_size "1,1,1,4"
 ```
 
-Optimized for CPUs with 128-bit registers + INT8 (e.g., ARM with NEON).
+Optimized for hardware with specific sparse operation support. The block_size format is `[H, W, InChannels, OutChannels]` for Conv2D layers.
 
 ### Example 5: With Fine-Tuning
 
@@ -189,7 +197,8 @@ python prune_model.py \
 
 ```bash
 # For DE1-SoC with FPGA systolic arrays (Conv2D on FPGA, other layers on ARM CPU)
-# Use block_size=[4,4] to match FPGA systolic array architecture
+# Use block_size=[1,1,4,4] to match FPGA systolic array architecture
+# Format: [H, W, InputChannels, OutputChannels]
 
 # Option A: With separate training dataset (recommended)
 python prune_model.py \
@@ -197,7 +206,7 @@ python prune_model.py \
     --output ./checkpoints/yolov4-tiny-pruned-fpga-ft \
     --model yolov4 --tiny \
     --final_sparsity 0.5 \
-    --block_size "4,4" \
+    --block_size "1,1,4,4" \
     --fine_tune True \
     --train_dataset ./data/dataset/train2017.txt \
     --epochs 2 \
@@ -210,7 +219,7 @@ python prune_model.py \
     --output ./checkpoints/yolov4-tiny-pruned-fpga-ft \
     --model yolov4 --tiny \
     --final_sparsity 0.5 \
-    --block_size "4,4" \
+    --block_size "1,1,4,4" \
     --fine_tune True \
     --train_dataset ./data/dataset/val2017.txt \
     --epochs 1 \
@@ -229,7 +238,7 @@ python convert_tflite.py \
 ```
 
 **Optimal for FPGA deployment**: 
-- `block_size=[4,4]` maps perfectly to 4×4 systolic array PEs on FPGA
+- `block_size=[1,1,4,4]` creates 4×4 structured sparsity in weight matrices
 - Pruned Conv2D layers can skip entire zero blocks on FPGA (1.8-2.2x speedup)
 - INT8 quantization reduces ARM CPU overhead for non-Conv2D layers
 - Fine-tuning recovers accuracy lost from pruning
@@ -237,13 +246,14 @@ python convert_tflite.py \
 
 **Alternative for pure ARM CPU deployment** (no FPGA):
 ```bash
-# Use block_size=[1,16] for ARM NEON SIMD optimization
+# Use block_size=[1,1,1,4] for ARM NEON SIMD optimization
+# Prunes 4 output channels at a time (aligns with 128-bit NEON registers)
 python prune_model.py \
     --weights ./data/yolov4-tiny.weights \
     --output ./checkpoints/yolov4-tiny-pruned-arm-ft \
     --model yolov4 --tiny \
     --final_sparsity 0.5 \
-    --block_size "1,16" \
+    --block_size "1,1,1,4" \
     --fine_tune True \
     --train_dataset ./data/dataset/train.txt \
     --epochs 2 \
@@ -268,6 +278,46 @@ python prune_model.py \
 - INT8 quantization provides additional 4x compression beyond pruning
 
 ## Implementation Details
+
+### Block Sparsity Explained
+
+**Block sparsity** (structured sparsity) prunes weights in groups rather than individually. This is crucial for hardware acceleration.
+
+#### Block Size Format for Conv2D Layers
+
+Conv2D weight tensors have shape `[kernel_height, kernel_width, input_channels, output_channels]`. The `block_size` parameter must match this 4D structure:
+
+```
+--block_size "H,W,InCh,OutCh"
+```
+
+**Common Configurations:**
+
+| Block Size | Pruning Pattern | Hardware Target | Description |
+|------------|----------------|-----------------|-------------|
+| `[1,1,1,4]` | 4 output channels | ARM NEON, x86 SIMD | Prunes 4 filters at a time |
+| `[1,1,4,1]` | 4 input channels | General purpose | Prunes 4 input channels at a time |
+| `[1,1,4,4]` | 4×4 channel blocks | FPGA systolic arrays | Prunes 16 weights in channel dimension |
+| Omit parameter | Unstructured | General purpose | Prunes individual weights (best compression) |
+
+**Examples:**
+
+```bash
+# Unstructured pruning (best compression, may not accelerate on all hardware)
+python prune_model.py --final_sparsity 0.5
+
+# Structured pruning for ARM NEON (prunes 4 output channels at a time)
+python prune_model.py --final_sparsity 0.5 --block_size "1,1,1,4"
+
+# Structured pruning for FPGA (prunes 4×4 blocks in channel dimensions)
+python prune_model.py --final_sparsity 0.5 --block_size "1,1,4,4"
+```
+
+**⚠️ Important Notes:**
+- Block size `[4,4]` is **INVALID** for Conv2D (only works for 2D Dense layers)
+- Must use 4D format like `[1,1,4,4]` for Conv2D
+- Larger blocks = easier hardware acceleration but less compression
+- Unstructured pruning (no block_size) gives best compression but requires special hardware support
 
 ### Based on Official TensorFlow Guides
 

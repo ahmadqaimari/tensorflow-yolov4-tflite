@@ -339,7 +339,7 @@ def fine_tune_pruned_model(model_for_pruning):
             output1 = tf.reshape(small_grid, [FLAGS.batch_size, FLAGS.input_size // 16, FLAGS.input_size // 16, 255])
             output2 = tf.reshape(medium_grid, [FLAGS.batch_size, FLAGS.input_size // 32, FLAGS.input_size // 32, 255])
 
-            return images, [output1, output2]
+            return images, (output1, output2)
 
         train_dataset = train_dataset.map(process_batch)
 
@@ -356,12 +356,12 @@ def fine_tune_pruned_model(model_for_pruning):
         num_samples = 100
         x_train = np.random.rand(num_samples, FLAGS.input_size, FLAGS.input_size, 3).astype(np.float32)
 
-        # Create outputs for BOTH detection heads
+        # Create outputs for BOTH detection heads (as separate arrays, not a list)
         y_train_large = np.random.rand(num_samples, FLAGS.input_size // 16, FLAGS.input_size // 16, 255).astype(np.float32)  # 26x26
         y_train_small = np.random.rand(num_samples, FLAGS.input_size // 32, FLAGS.input_size // 32, 255).astype(np.float32)  # 13x13
-        y_train = [y_train_large, y_train_small]
 
-        train_dataset = tf.data.Dataset.from_tensor_slices((x_train, y_train))
+        # Create dataset with tuple outputs (Keras expects tuple for multiple outputs)
+        train_dataset = tf.data.Dataset.from_tensor_slices((x_train, (y_train_large, y_train_small)))
         train_dataset = train_dataset.batch(FLAGS.batch_size)
         steps_per_epoch = None
 

@@ -51,7 +51,6 @@ flags.DEFINE_integer('batch_size', 8, 'batch size for training')
 flags.DEFINE_float('learning_rate', 1e-4, 'learning rate for fine-tuning')
 
 # Pruning strategy
-flags.DEFINE_boolean('prune_whole_model', True, 'prune all layers vs selective pruning')
 flags.DEFINE_string('skip_layers', '', 'comma-separated layer names to skip (e.g., "conv2d_0,conv2d_1")')
 
 
@@ -134,36 +133,6 @@ def get_pruning_params():
     return pruning_params
 
 
-def apply_pruning_to_dense_and_conv(layer):
-    """
-    Apply pruning only to Conv2D layers (Dense layers are not common in YOLO).
-    This is the selective pruning approach.
-
-    Args:
-        layer: Keras layer
-
-    Returns:
-        Pruned layer or original layer
-    """
-    pruning_params = get_pruning_params()
-
-    # Skip layers if specified
-    skip_layer_names = []
-    if FLAGS.skip_layers:
-        skip_layer_names = [name.strip() for name in FLAGS.skip_layers.split(',')]
-
-    if layer.name in skip_layer_names:
-        logging.info(f"Skipping pruning for layer: {layer.name}")
-        return layer
-
-    # Prune Conv2D layers (main computation in YOLO)
-    if isinstance(layer, tf.keras.layers.Conv2D):
-        logging.info(f"Applying pruning to Conv2D layer: {layer.name}")
-        return tfmot.sparsity.keras.prune_low_magnitude(layer, **pruning_params)
-
-    return layer
-
-
 def load_pretrained_model():
     """
     Load pre-trained YOLOv4-tiny model from weights file.
@@ -189,25 +158,57 @@ def create_pruned_model(base_model):
     """
     Create a pruned model from base model using TFMOT API.
 
+    Uses selective pruning to only prune Conv2D layers and skip:
+    - BatchNormalization (custom or built-in)
+    - Activation layers
+    - Other non-convolutional layers
+
     Args:
         base_model: Pre-trained Keras model
 
     Returns:
         Pruned model with pruning wrappers
     """
+    from core.common import BatchNormalization as CustomBatchNorm
+
     pruning_params = get_pruning_params()
 
-    if FLAGS.prune_whole_model:
-        logging.info("Applying pruning to ENTIRE model...")
-        # Prune the whole model - simplest approach
-        model_for_pruning = tfmot.sparsity.keras.prune_low_magnitude(base_model, **pruning_params)
-    else:
-        logging.info("Applying SELECTIVE pruning (Conv2D layers only)...")
-        # Selective pruning - prune only Conv2D layers
-        model_for_pruning = tf.keras.models.clone_model(
-            base_model,
-            clone_function=apply_pruning_to_dense_and_conv,
-        )
+    def apply_pruning_wrapper(layer):
+        """Apply pruning only to Conv2D layers, skip everything else"""
+        # Skip custom BatchNorm (from core.common)
+        if isinstance(layer, CustomBatchNorm):
+            logging.info(f"Skipping custom BatchNorm layer: {layer.name}")
+            return layer
+
+        # Skip built-in BatchNorm
+        if isinstance(layer, tf.keras.layers.BatchNormalization):
+            logging.info(f"Skipping BatchNorm layer: {layer.name}")
+            return layer
+
+        # Skip layers in user-specified skip list
+        skip_layer_names = []
+        if FLAGS.skip_layers:
+            skip_layer_names = [name.strip() for name in FLAGS.skip_layers.split(',')]
+
+        if layer.name in skip_layer_names:
+            logging.info(f"Skipping layer (user specified): {layer.name}")
+            return layer
+
+        # Only prune Conv2D layers
+        if isinstance(layer, tf.keras.layers.Conv2D):
+            logging.info(f"Applying pruning to Conv2D layer: {layer.name}")
+            return tfmot.sparsity.keras.prune_low_magnitude(layer, **pruning_params)
+
+        # Return all other layers unchanged
+        return layer
+
+    logging.info("Applying SELECTIVE pruning (Conv2D only, skipping BatchNorm)...")
+
+    # Clone model with selective pruning
+    model_for_pruning = tf.keras.models.clone_model(
+        base_model,
+        clone_function=apply_pruning_wrapper,
+    )
 
     return model_for_pruning
 
@@ -390,8 +391,10 @@ def prune_yolo():
     logging.info("YOLO PRUNING WITH TENSORFLOW MODEL OPTIMIZATION TOOLKIT")
     logging.info("=" * 80)
     logging.info(f"Target sparsity: {FLAGS.final_sparsity * 100:.1f}%")
-    logging.info(f"Prune whole model: {FLAGS.prune_whole_model}")
+    logging.info(f"Pruning strategy: Selective (Conv2D only, skips BatchNorm)")
     logging.info(f"Fine-tune: {FLAGS.fine_tune}")
+    if FLAGS.block_size:
+        logging.info(f"Block sparsity: {FLAGS.block_size}")
     logging.info("=" * 80)
 
     # STEP 1: Load pre-trained model

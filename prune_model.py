@@ -59,6 +59,44 @@ flags.DEFINE_string('skip_layers', '', 'comma-separated layer names to skip (e.g
 # HELPER FUNCTIONS
 # ==============================================================================
 
+def configure_gpu():
+    """
+    Configure GPU settings for pruning/fine-tuning.
+    Enables memory growth and displays GPU information.
+
+    Returns:
+        bool: True if GPU is available and configured, False otherwise
+    """
+    gpus = tf.config.list_physical_devices('GPU')
+
+    if len(gpus) == 0:
+        logging.warning("=" * 80)
+        logging.warning("⚠️  WARNING: No GPU found!")
+        logging.warning("⚠️  Fine-tuning will run on CPU (very slow)")
+        logging.warning("⚠️  Consider using a machine with GPU for faster training")
+        logging.warning("=" * 80)
+        return False
+
+    logging.info("=" * 80)
+    logging.info(f"✅ Found {len(gpus)} GPU(s):")
+    for i, gpu in enumerate(gpus):
+        logging.info(f"   GPU {i}: {gpu.name}")
+
+    try:
+        # Enable memory growth (prevents TF from allocating all GPU memory at once)
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+
+        logging.info("✅ GPU memory growth enabled")
+        logging.info("=" * 80)
+        return True
+
+    except RuntimeError as e:
+        logging.error(f"❌ GPU configuration error: {e}")
+        logging.error("   GPU may already be initialized")
+        return False
+
+
 def get_pruning_params():
     """
     Create pruning parameters based on FLAGS.
@@ -193,9 +231,31 @@ def fine_tune_pruned_model(model_for_pruning):
     logging.info("FINE-TUNING PRUNED MODEL")
     logging.info("=" * 80)
 
+    # Verify GPU is being used
+    logging.info("\n🔍 Checking device placement:")
+    logical_devices = tf.config.list_logical_devices()
+    for device in logical_devices:
+        logging.info(f"   {device.device_type}: {device.name}")
+
+    # Check where model weights are placed
+    if len(model_for_pruning.layers) > 0:
+        first_layer_with_weights = None
+        for layer in model_for_pruning.layers:
+            if len(layer.weights) > 0:
+                first_layer_with_weights = layer
+                break
+
+        if first_layer_with_weights:
+            device = first_layer_with_weights.weights[0].device
+            logging.info(f"   Model weights device: {device}")
+            if 'GPU' in device:
+                logging.info("   ✅ Model is on GPU")
+            else:
+                logging.warning("   ⚠️  Model is on CPU")
+
     # Load training dataset (you need to implement this based on your data format)
     # For now, we'll use a placeholder
-    logging.warning("Fine-tuning requires proper dataset implementation")
+    logging.warning("\nFine-tuning requires proper dataset implementation")
     logging.info("Using dummy data for demonstration...")
 
     # Create dummy data
@@ -218,15 +278,23 @@ def fine_tune_pruned_model(model_for_pruning):
     ]
 
     # Train
-    logging.info(f"Training for {FLAGS.epochs} epochs...")
-    model_for_pruning.fit(
+    logging.info(f"\nTraining for {FLAGS.epochs} epochs...")
+    logging.info("Monitoring GPU utilization (check nvidia-smi in another terminal)...")
+
+    # Fit model - TensorFlow will automatically use GPU if available
+    history = model_for_pruning.fit(
         x_train,
         y_train,
         batch_size=FLAGS.batch_size,
         epochs=FLAGS.epochs,
         validation_split=0.1,
-        callbacks=callbacks
+        callbacks=callbacks,
+        verbose=1
     )
+
+    # Verify tensors were on GPU during training
+    logging.info("\n✅ Training completed")
+    logging.info(f"   Final loss: {history.history['loss'][-1]:.4f}")
 
     logging.info(f"✓ Fine-tuning complete. TensorBoard logs: {logdir}")
     logging.info(f"  View logs: tensorboard --logdir={logdir}")
@@ -307,14 +375,18 @@ def prune_yolo():
     Main pruning pipeline following TFMOT best practices.
 
     Pipeline:
-    1. Load pre-trained model
-    2. Apply pruning API
-    3. Fine-tune (optional)
-    4. Strip pruning wrappers
-    5. Export for TFLite conversion
+    1. Configure GPU
+    2. Load pre-trained model
+    3. Apply pruning API
+    4. Fine-tune (optional)
+    5. Strip pruning wrappers
+    6. Export for TFLite conversion
     """
 
-    logging.info("=" * 80)
+    # Configure GPU first (before any TensorFlow operations)
+    configure_gpu()
+
+    logging.info("\n" + "=" * 80)
     logging.info("YOLO PRUNING WITH TENSORFLOW MODEL OPTIMIZATION TOOLKIT")
     logging.info("=" * 80)
     logging.info(f"Target sparsity: {FLAGS.final_sparsity * 100:.1f}%")

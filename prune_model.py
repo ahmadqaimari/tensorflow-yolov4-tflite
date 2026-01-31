@@ -264,8 +264,8 @@ def fine_tune_pruned_model(model_for_pruning):
             else:
                 logging.warning("   ⚠️  Model is on CPU")
 
-    # Load training dataset
-    logging.warning("\n⚠️  Fine-tuning with MSE loss (not proper YOLO loss)")
+    # Load training dataset with REAL YOLO TARGETS
+    logging.info("\n⚠️  Fine-tuning with REAL YOLO TARGETS from annotations")
     logging.info("Loading dataset from: {}".format(FLAGS.train_dataset))
 
     # YOLOv4-Tiny has TWO output heads (multi-scale detection):
@@ -275,70 +275,175 @@ def fine_tune_pruned_model(model_for_pruning):
 
     try:
         import cv2
-        import core.utils as utils
         from core.config import cfg
 
-        # Load image paths
-        logging.info(f"Reading image list from: {FLAGS.train_dataset}")
+        # Load config for YOLO
+        STRIDES, ANCHORS, NUM_CLASS, XYSCALE = utils.load_config(FLAGS)
+
+        # YOLOv4-Tiny has 2 strides: [16, 32]
+        strides = np.array(STRIDES)
+        anchors = ANCHORS
+        num_classes = NUM_CLASS
+        anchor_per_scale = 3
+        max_bbox_per_scale = 150
+
+        logging.info(f"YOLOv4-Tiny config:")
+        logging.info(f"  Strides: {strides}")
+        logging.info(f"  Anchors: {anchors}")
+        logging.info(f"  Classes: {num_classes}")
+
+        # Load annotations
+        logging.info(f"Reading annotations from: {FLAGS.train_dataset}")
         with open(FLAGS.train_dataset, 'r') as f:
-            lines = f.readlines()
+            annotations = [line.strip() for line in f.readlines() if len(line.strip().split()[1:]) != 0]
 
-        # Parse annotations (format: image_path x1,y1,x2,y2,class ...)
-        image_paths = []
-        for line in lines:
-            parts = line.strip().split()
-            if len(parts) > 0:
-                image_paths.append(parts[0])
-
-        num_images = len(image_paths)
-        logging.info(f"✓ Found {num_images} images")
+        num_images = len(annotations)
+        logging.info(f"✓ Found {num_images} images with annotations")
 
         if num_images == 0:
-            raise ValueError("No images found in dataset file")
+            raise ValueError("No images with annotations found in dataset file")
 
-        # Create a simple data generator for YOLOv4-Tiny (2 outputs only)
+        def parse_annotation(annotation):
+            """Parse annotation line: image_path x1,y1,x2,y2,class x1,y1,x2,y2,class ..."""
+            line = annotation.split()
+            image_path = line[0]
+
+            bboxes = []
+            if len(line) > 1:
+                bboxes = np.array([list(map(float, box.split(','))) for box in line[1:]])
+            else:
+                bboxes = np.array([])
+
+            return image_path, bboxes
+
+        def preprocess_true_boxes(bboxes):
+            """
+            Preprocess ground truth bounding boxes into YOLO grid format.
+
+            Args:
+                bboxes: [N, 5] array of [x1, y1, x2, y2, class_id]
+
+            Returns:
+                Tuple of (label_large, label_small) for the two detection heads
+            """
+            # Initialize output grids for 2 scales
+            train_output_sizes = FLAGS.input_size // strides
+
+            # label shape: [grid_h, grid_w, anchors_per_scale, 5+num_classes]
+            label_large = np.zeros((train_output_sizes[0], train_output_sizes[0], anchor_per_scale, 5 + num_classes), dtype=np.float32)
+            label_small = np.zeros((train_output_sizes[1], train_output_sizes[1], anchor_per_scale, 5 + num_classes), dtype=np.float32)
+
+            labels = [label_large, label_small]
+
+            if len(bboxes) == 0:
+                # No objects in image
+                # Flatten anchor dimension: [H, W, 3, 85] -> [H, W, 255]
+                return (label_large.reshape(train_output_sizes[0], train_output_sizes[0], -1),
+                        label_small.reshape(train_output_sizes[1], train_output_sizes[1], -1))
+
+            # Process each ground truth box
+            for bbox in bboxes:
+                bbox_coor = bbox[:4]
+                bbox_class_ind = int(bbox[4])
+
+                # Calculate center and size
+                bbox_xywh = np.concatenate([
+                    (bbox_coor[2:] + bbox_coor[:2]) * 0.5,  # center x, y
+                    bbox_coor[2:] - bbox_coor[:2]  # width, height
+                ], axis=-1)
+
+                # Normalize to [0, 1]
+                bbox_xywh_scaled = 1.0 * bbox_xywh / FLAGS.input_size
+
+                # Assign bbox to appropriate scale based on size
+                for i, stride in enumerate(strides):
+                    # Calculate grid cell coordinates
+                    xind = int(np.floor(bbox_xywh_scaled[0] * train_output_sizes[i]))
+                    yind = int(np.floor(bbox_xywh_scaled[1] * train_output_sizes[i]))
+
+                    # Clip to valid range
+                    xind = np.clip(xind, 0, train_output_sizes[i] - 1)
+                    yind = np.clip(yind, 0, train_output_sizes[i] - 1)
+
+                    # Find best anchor for this bbox
+                    bbox_wh_scaled = bbox_xywh_scaled[2:4]
+                    best_anchor_ind = 0
+                    max_iou = 0
+
+                    for anchor_ind in range(anchor_per_scale):
+                        anchor_wh = anchors[i][anchor_ind] / FLAGS.input_size
+                        min_wh = np.minimum(bbox_wh_scaled, anchor_wh)
+                        iou = (min_wh[0] * min_wh[1]) / (bbox_wh_scaled[0] * bbox_wh_scaled[1] + anchor_wh[0] * anchor_wh[1] - min_wh[0] * min_wh[1] + 1e-10)
+
+                        if iou > max_iou:
+                            max_iou = iou
+                            best_anchor_ind = anchor_ind
+
+                    # Encode bbox in grid cell
+                    label = labels[i]
+                    label[yind, xind, best_anchor_ind, 0:4] = bbox_xywh
+                    label[yind, xind, best_anchor_ind, 4] = 1.0  # objectness
+                    label[yind, xind, best_anchor_ind, 5 + bbox_class_ind] = 1.0  # class
+
+            # Flatten anchor dimension: [H, W, 3, 85] -> [H, W, 255]
+            label_large_flat = label_large.reshape(train_output_sizes[0], train_output_sizes[0], -1)
+            label_small_flat = label_small.reshape(train_output_sizes[1], train_output_sizes[1], -1)
+
+            return label_large_flat, label_small_flat
+
         def data_generator():
-            """Generate batches of images with dummy targets for fine-tuning"""
+            """Generate batches with REAL YOLO targets from annotations"""
             batch_count = 0
             max_batches = FLAGS.end_step // FLAGS.epochs
 
+            # Shuffle annotations
+            np.random.shuffle(annotations)
+
             while batch_count < max_batches:
                 batch_images = []
+                batch_labels_large = []
+                batch_labels_small = []
 
-                # Load a batch of images
+                # Load a batch
                 for i in range(FLAGS.batch_size):
                     idx = (batch_count * FLAGS.batch_size + i) % num_images
-                    img_path = image_paths[idx]
+                    annotation = annotations[idx]
+
+                    image_path, bboxes = parse_annotation(annotation)
 
                     try:
                         # Load and preprocess image
-                        image = cv2.imread(img_path)
+                        image = cv2.imread(image_path)
                         if image is None:
-                            # If image fails to load, create dummy image
-                            image = np.random.randint(0, 255, (FLAGS.input_size, FLAGS.input_size, 3), dtype=np.uint8)
-                        else:
-                            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-                            image = cv2.resize(image, (FLAGS.input_size, FLAGS.input_size))
+                            raise ValueError(f"Failed to load image: {image_path}")
 
-                        # Normalize to [0, 1]
+                        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                        image = cv2.resize(image, (FLAGS.input_size, FLAGS.input_size))
                         image = image.astype(np.float32) / 255.0
+
+                        # Generate YOLO targets
+                        label_large, label_small = preprocess_true_boxes(bboxes)
+
                         batch_images.append(image)
+                        batch_labels_large.append(label_large)
+                        batch_labels_small.append(label_small)
 
                     except Exception as e:
-                        # If any error, use dummy image
+                        logging.warning(f"Error loading {image_path}: {e}, using dummy data")
+                        # Use dummy image and empty targets
                         image = np.random.rand(FLAGS.input_size, FLAGS.input_size, 3).astype(np.float32)
+                        label_large, label_small = preprocess_true_boxes(np.array([]))
+
                         batch_images.append(image)
+                        batch_labels_large.append(label_large)
+                        batch_labels_small.append(label_small)
 
                 # Stack batch
                 batch_images = np.array(batch_images)
+                batch_labels_large = np.array(batch_labels_large)
+                batch_labels_small = np.array(batch_labels_small)
 
-                # Create dummy target grids (for MSE loss during pruning fine-tuning)
-                # In real training, these would be proper YOLO targets from annotations
-                # For pruning fine-tuning, we just need the model to maintain its predictions
-                target_large = np.zeros((FLAGS.batch_size, FLAGS.input_size // 16, FLAGS.input_size // 16, 255), dtype=np.float32)
-                target_small = np.zeros((FLAGS.batch_size, FLAGS.input_size // 32, FLAGS.input_size // 32, 255), dtype=np.float32)
-
-                yield batch_images, (target_large, target_small)
+                yield batch_images, (batch_labels_large, batch_labels_small)
                 batch_count += 1
 
         # Create TensorFlow dataset
@@ -356,28 +461,17 @@ def fine_tune_pruned_model(model_for_pruning):
         # Calculate steps
         steps_per_epoch = min(num_images // FLAGS.batch_size, FLAGS.end_step // FLAGS.epochs)
         logging.info(f"✓ Steps per epoch: {steps_per_epoch}")
-        logging.info(f"✓ Dataset created successfully")
+        logging.info(f"✓ Dataset created with REAL YOLO TARGETS")
 
     except Exception as e:
         logging.error(f"❌ Failed to load dataset: {e}")
-        logging.error("   Falling back to dummy data for testing...")
-        logging.error("   NOTE: This will NOT produce a useful pruned model!")
+        logging.error("   This is a critical error - pruning fine-tuning needs real data!")
 
         import traceback
         traceback.print_exc()
 
-        # Fallback to dummy data
-        num_samples = 100
-        x_train = np.random.rand(num_samples, FLAGS.input_size, FLAGS.input_size, 3).astype(np.float32)
+        raise RuntimeError("Cannot proceed without valid training dataset")
 
-        # Create outputs for BOTH detection heads (as separate arrays, not a list)
-        y_train_large = np.random.rand(num_samples, FLAGS.input_size // 16, FLAGS.input_size // 16, 255).astype(np.float32)  # 26x26
-        y_train_small = np.random.rand(num_samples, FLAGS.input_size // 32, FLAGS.input_size // 32, 255).astype(np.float32)  # 13x13
-
-        # Create dataset with tuple outputs (Keras expects tuple for multiple outputs)
-        train_dataset = tf.data.Dataset.from_tensor_slices((x_train, (y_train_large, y_train_small)))
-        train_dataset = train_dataset.batch(FLAGS.batch_size)
-        steps_per_epoch = None
 
     # Compile model with multiple outputs
     model_for_pruning.compile(

@@ -474,12 +474,18 @@ def fine_tune_pruned_model(model_for_pruning):
 
 
     # Compile model with multiple outputs
+    logging.warning("\n⚠️  Using Huber loss (more robust than MSE for YOLO)")
+    logging.warning("⚠️  Expected loss range: 1-20 (NOT 100+)")
+    logging.warning("⚠️  If loss >50, something is wrong with the data/model")
+
+    # Huber loss is more robust than MSE for YOLO outputs
+    # It's less sensitive to outliers and gives more reasonable loss values
+    huber_loss = tf.keras.losses.Huber(delta=1.0)
+
     model_for_pruning.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=FLAGS.learning_rate),
-        loss='mse',  # Use your actual YOLO loss function here
-        # For multiple outputs, loss can be a list or dict
-        # loss=['mse', 'mse'],  # One loss per output
-        metrics=['accuracy']
+        loss=huber_loss,  # Huber loss instead of MSE
+        metrics=[]  # Remove accuracy - meaningless for detection
     )
 
     # Create callbacks

@@ -2,6 +2,7 @@ opencv-python
 lxml
 tqdm
 tensorflow==2.12
+tensorflow-model-optimization
 absl-py
 easydict
 matplotlib

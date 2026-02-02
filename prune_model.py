@@ -386,9 +386,10 @@ def fine_tune_pruned_model(model_for_pruning):
                                 max_iou = iou
                                 best_anchor_ind = anchor_ind
 
-                        # Encode bbox in grid cell (normalized [0,1] as expected by compute_loss)
+                        # Encode bbox in grid cell (in PIXELS as expected by compute_loss)
+                        # Note: compute_loss divides by input_size² internally for loss scaling
                         label = labels[i]
-                        label[yind, xind, best_anchor_ind, 0:4] = bbox_xywh / FLAGS.input_size  # Normalize to [0,1]
+                        label[yind, xind, best_anchor_ind, 0:4] = bbox_xywh  # Keep in pixels
                         label[yind, xind, best_anchor_ind, 4] = 1.0  # objectness
                         label[yind, xind, best_anchor_ind, 5 + bbox_class_ind] = 1.0  # class
 
@@ -563,6 +564,15 @@ def fine_tune_pruned_model(model_for_pruning):
 
                 label = target[i][0]  # Grid labels [batch, H, W, 3, 85]
                 bboxes = target[i][1]  # GT bboxes [batch, 150, 4]
+
+                # Debug: Check shapes and values
+                # tf.print(f"\nScale {i}:")
+                # tf.print("  conv shape:", tf.shape(conv))
+                # tf.print("  pred shape:", tf.shape(pred))
+                # tf.print("  label shape:", tf.shape(label))
+                # tf.print("  bboxes shape:", tf.shape(bboxes))
+                # tf.print("  label bbox range:", tf.reduce_min(label[:,:,:,:,0:4]), tf.reduce_max(label[:,:,:,:,0:4]))
+                # tf.print("  bboxes range:", tf.reduce_min(bboxes), tf.reduce_max(bboxes))
 
                 # Compute YOLO loss components
                 loss_items = compute_loss(
